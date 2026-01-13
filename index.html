@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>image-compare</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 18px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      .col {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      canvas {
+        border: 1px solid #999;
+      }
+      #matches {
+        max-width: 100%;
+      }
+      .controls {
+        margin-bottom: 12px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      label {
+        font-size: 90%;
+      }
+      button {
+        padding: 6px 10px;
+      }
+
+      /* Drag & drop styles */
+      .dropzone {
+        width: 150px;
+        height: 100px;
+        border: 2px dashed #bbb;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #666;
+        background: #fafafa;
+        cursor: pointer;
+        position: relative;
+        overflow: hidden;
+      }
+      .dropzone.dragover {
+        border-color: #4a90e2;
+        background: #f0f8ff;
+        color: #111;
+      }
+      .dropzone.small {
+        width: 200px;
+        height: 150px;
+      }
+      .hidden-input {
+        display: none;
+      }
+
+      /* preview canvas inside dropzone */
+      .dropzone canvas {
+        display: block;
+        max-width: 100%;
+        max-height: 100%;
+      }
+      .drop-instruction {
+        position: absolute;
+        pointer-events: none;
+        text-align: center;
+        width: 100%;
+      }
+
+      /* slider styling */
+      .fps-control {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .fps-control input[type="range"] {
+        width: 150px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <div>
+        <div><strong>Images (drop here)</strong></div>
+        <div id="dropContainer" class="row"></div>
+      </div>
+
+      <!-- Keep Align button -->
+      <div>
+        <button id="alignBtn">Align</button>
+      </div>
+
+      <!-- FPS slider + pause/resume button -->
+      <div class="fps-control">
+        <label for="fpsSlider">FPS:</label>
+        <input id="fpsSlider" type="range" min="1" max="30" value="2" step="1" />
+        <span id="fpsValue">2 fps</span>
+        <button id="pauseBtn">Play</button>
+      </div>
+
+      <!-- Per-dropzone hidden inputs are created dynamically -->
+    </div>
+
+    <!-- Removed visible source/target canvases per request.
+         Only the Matches/Overlay canvas remains. -->
+      <div><strong>Composite</strong></div>
+    <div class="row">
+      <canvas id="animation" width="800" height="300"></canvas>
+    </div>
+
+    <script
+      async
+      src="https://docs.opencv.org/4.x/opencv.js"
+      onload="onOpenCvReady();"
+    ></script>
+
+    <script>
+      let srcImg = null,
+        tgtImg = null;
+      
+      const dropContainer = document.getElementById("dropContainer");
+      const dropZones = [];
+      const alignBtn = document.getElementById("alignBtn");
+
+      // FPS controls
+      const fpsSlider = document.getElementById("fpsSlider");
+      const fpsValue = document.getElementById("fpsValue");
+      const pauseBtn = document.getElementById("pauseBtn");
+
+      // Dynamic dropzones: create as needed and append to container
+      function createDropzone() {
+        const dropElem = document.createElement("div");
+        dropElem.className = "dropzone";
+
+        const instruction = document.createElement("div");
+        instruction.className = "drop-instruction";
+        instruction.textContent = "Drop image or click to select";
+        dropElem.appendChild(instruction);
+
+        const canvas = document.createElement("canvas");
+        canvas.className = "preview-canvas";
+        dropElem.appendChild(canvas);
+
+        const inputElem = document.createElement("input");
+        inputElem.type = "file";
+        inputElem.accept = "image/*";
+        inputElem.className = "hidden-input";
+        dropElem.appendChild(inputElem);
+
+        dropContainer.appendChild(dropElem);
+        addDnDHandlers(dropElem, inputElem, canvas);
+        dropZones.push({ dropElem, inputElem, canvas });
+        return { dropElem, inputElem, canvas };
+      }
+
+      function allDropzonesFilled() {
+        return dropZones.length > 0 && dropZones.every(z => z.dropElem.classList.contains("filled"));
+      }
+
+      function ensureExtraSlot() {
+        if (allDropzonesFilled()) {
+          createDropzone();
+        }
+      }
+
+      const animationCanvas = document.getElementById("animation");
+
+      // Utility to prevent default drag behavior
+      function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      function addDnDHandlers(dropElem, inputElem, canvas) {
+        ["dragenter", "dragover", "dragleave", "drop"].forEach((evt) =>
+          dropElem.addEventListener(evt, preventDefaults, false)
+        );
+        ["dragenter", "dragover"].forEach((evt) =>
+          dropElem.addEventListener(evt, () => dropElem.classList.add("dragover"))
+        );
+        ["dragleave", "drop"].forEach((evt) =>
+          dropElem.addEventListener(evt, () => dropElem.classList.remove("dragover"))
+        );
+
+        dropElem.addEventListener(
+          "drop",
+          (e) => {
+            const dt = e.dataTransfer;
+            const file = dt && dt.files && dt.files[0];
+            if (file) loadFileToCanvas(file, canvas, dropElem);
+          },
+          false
+        );
+
+        // click opens file dialog as fallback
+        dropElem.addEventListener("click", () => inputElem.click());
+        inputElem.addEventListener("change", () => {
+          const file = inputElem.files && inputElem.files[0];
+          if (file) loadFileToCanvas(file, canvas, dropElem);
+          inputElem.value = ""; // reset
+        });
+      }
+      
+      // Initialize with two empty dropzones
+      createDropzone();
+      createDropzone();
+
+      function loadFileToCanvas(file, canvas, dropElem, callback) {
+        if (!file) return;
+        const img = new Image();
+        img.onload = () => {
+          const ctx = canvas.getContext("2d");
+          // choose a sensible max to avoid huge canvases
+          canvas.width = Math.min(img.width, 800);
+          canvas.height = Math.min(img.height, 600);
+          const scale = Math.min(canvas.width / img.width, canvas.height / img.height, 1);
+          const w = img.width * scale;
+          const h = img.height * scale;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, w, h);
+
+          // remove instruction overlay if present
+          const instr = dropElem.querySelector(".drop-instruction");
+          if (instr) instr.remove();
+
+          // mark as filled and ensure there is always an extra empty slot
+          dropElem.classList.add("filled");
+          ensureExtraSlot();
+
+          URL.revokeObjectURL(img.src);
+          callback && callback();
+        };
+        img.onerror = () => {
+          console.error("Failed to load image file.");
+        };
+        img.src = URL.createObjectURL(file);
+      }
+
+      function onOpenCvReady() {
+        if (typeof cv === "undefined") {
+          console.error("OpenCV.js script failed to load.");
+          return;
+        }
+        if (cv.getBuildInformation !== undefined) {
+          console.log("OpenCV.js ready:", cv.getBuildInformation());
+        } else {
+          cv['onRuntimeInitialized'] = () => {
+            console.log("OpenCV.js ready:", cv.getBuildInformation());
+          };
+        }
+      }
+
+      function canvasToMat(canvas) {
+        const ctx = canvas.getContext("2d");
+        if (canvas.width === 0 || canvas.height === 0)
+          return new cv.Mat(); // empty
+        let imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        let mat = cv.matFromImageData(imgData);
+        return mat;
+      }
+
+      function matToCanvas(mat, canvas) {
+        const ctx = canvas.getContext("2d");
+        const img = new ImageData(
+          new Uint8ClampedArray(mat.data),
+          mat.cols,
+          mat.rows
+        );
+        canvas.width = mat.cols;
+        canvas.height = mat.rows;
+        ctx.putImageData(img, 0, 0);
+      }
+
+      function alignImages() {
+        if (typeof cv === "undefined") {
+          alert("OpenCV.js not ready");
+          return;
+        }
+        const filled = dropZones.filter(z => z.canvas.width > 0 && z.canvas.height > 0);
+        if (filled.length < 2) {
+          alert("Load at least two images (fill two drop zones).");
+          return;
+        }
+        const srcCanvasSel = filled[0].canvas;
+        const tgtCanvasSel = filled[1].canvas;
+        let src = canvasToMat(srcCanvasSel);
+        let tgt = canvasToMat(tgtCanvasSel);
+        if (src.empty() || tgt.empty()) {
+          alert("Load both images (drop into the source and target areas).");
+          src.delete && src.delete();
+          tgt.delete && tgt.delete();
+          return;
+        }
+
+        let gray1 = new cv.Mat(),
+          gray2 = new cv.Mat();
+        cv.cvtColor(src, gray1, cv.COLOR_RGBA2GRAY);
+        cv.cvtColor(tgt, gray2, cv.COLOR_RGBA2GRAY);
+
+        let orb = new cv.ORB();
+        let kp1 = new cv.KeyPointVector();
+        let kp2 = new cv.KeyPointVector();
+        let des1 = new cv.Mat();
+        let des2 = new cv.Mat();
+        orb.detectAndCompute(gray1, new cv.Mat(), kp1, des1);
+        orb.detectAndCompute(gray2, new cv.Mat(), kp2, des2);
+
+        if (des1.rows === 0 || des2.rows === 0) {
+          alert("No features found in one of the images.");
+          [gray1, gray2, orb, kp1, kp2, des1, des2, src, tgt].forEach(
+            (x) => x.delete && x.delete()
+          );
+          return;
+        }
+
+        let bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+        let matches = new cv.DMatchVector();
+        bf.match(des1, des2, matches);
+
+        const mArr = [];
+        for (let i = 0; i < matches.size(); i++) mArr.push(matches.get(i));
+        mArr.sort((a, b) => a.distance - b.distance);
+
+        const keep = Math.min(200, Math.max(10, Math.floor(mArr.length * 0.3)));
+        const goodMatches = new cv.DMatchVector();
+        for (let i = 0; i < keep; i++) goodMatches.push_back(mArr[i]);
+
+        if (goodMatches.size() < 4) {
+          alert("Not enough good matches for homography.");
+          [
+            gray1,
+            gray2,
+            orb,
+            kp1,
+            kp2,
+            des1,
+            des2,
+            bf,
+            matches,
+            goodMatches,
+            src,
+            tgt,
+          ].forEach((x) => x.delete && x.delete());
+          return;
+        }
+
+        let srcPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
+        let dstPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
+        for (let i = 0; i < goodMatches.size(); i++) {
+          const m = goodMatches.get(i);
+          const kp_1 = kp1.get(m.queryIdx).pt;
+          const kp_2 = kp2.get(m.trainIdx).pt;
+          srcPts.floatPtr(i, 0)[0] = kp_1.x;
+          srcPts.floatPtr(i, 0)[1] = kp_1.y;
+          dstPts.floatPtr(i, 0)[0] = kp_2.x;
+          dstPts.floatPtr(i, 0)[1] = kp_2.y;
+        }
+
+        const mask = new cv.Mat();
+        const H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
+
+        if (H.empty()) {
+          alert("Homography estimation failed.");
+          [
+            gray1,
+            gray2,
+            orb,
+            kp1,
+            kp2,
+            des1,
+            des2,
+            bf,
+            matches,
+            goodMatches,
+            srcPts,
+            dstPts,
+            mask,
+            src,
+            tgt,
+          ].forEach((x) => x.delete && x.delete());
+          return;
+        }
+
+        let warped = new cv.Mat();
+        const dsize = new cv.Size(tgt.cols, tgt.rows);
+        cv.warpPerspective(
+          src,
+          warped,
+          H,
+          dsize,
+          cv.INTER_LINEAR,
+          cv.BORDER_CONSTANT,
+          new cv.Scalar()
+        );
+
+        matToCanvas(warped, animationCanvas);
+
+        [
+          gray1,
+          gray2,
+          orb,
+          des1,
+          des2,
+          bf,
+          matches,
+          srcPts,
+          dstPts,
+          mask,
+          H,
+          warped,
+        ].forEach((x) => x.delete && x.delete());
+        kp1.delete();
+        kp2.delete();
+        goodMatches.delete();
+        src.delete();
+        tgt.delete();
+      }
+
+      alignBtn.addEventListener("click", alignImages);
+
+      // Toggle state object used to manage animation interval/bitmaps/fps/pause
+      let _toggleState = null;
+      function stopToggle() {
+        if (!_toggleState) return;
+        try {
+          if (_toggleState.timer) clearInterval(_toggleState.timer);
+          if (_toggleState.bitmaps)
+            _toggleState.bitmaps.forEach((b) => b && b.close());
+        } catch (e) {
+          console.error("Error stopping toggle:", e);
+        }
+        _toggleState = null;
+        pauseBtn.textContent = "Pause";
+      }
+
+      async function startToggleBetweenCanvases(canvasA, canvasB, fps = 2) {
+        stopToggle();
+        try {
+          const [bmpA, bmpB] = await Promise.all([
+            createImageBitmap(canvasA),
+            createImageBitmap(canvasB),
+          ]);
+          const ctx = animationCanvas.getContext("2d");
+          animationCanvas.width = Math.max(bmpA.width, bmpB.width);
+          animationCanvas.height = Math.max(bmpA.height, bmpB.height);
+
+          // initialize toggle state
+          _toggleState = {
+            bitmaps: [bmpA, bmpB],
+            bmpA,
+            bmpB,
+            ctx,
+            fps: Math.max(1, Math.floor(fps)),
+            paused: false,
+            showB: true,
+            timer: null,
+          };
+
+          function drawOnce() {
+            _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+            _toggleState.ctx.drawImage(_toggleState.showB ? _toggleState.bmpB : _toggleState.bmpA, 0, 0);
+            _toggleState.showB = !_toggleState.showB;
+          }
+
+          function setTimer() {
+            if (!_toggleState) return;
+            if (_toggleState.timer) clearInterval(_toggleState.timer);
+            const period = 1000 / Math.max(1, _toggleState.fps);
+            _toggleState.timer = setInterval(() => {
+              drawOnce();
+            }, period);
+          }
+
+          // draw initial frame and start interval
+          drawOnce();
+          setTimer();
+        } catch (e) {
+          console.error("Failed to start toggle:", e);
+        }
+      }
+
+      // update fps display and, if running, update the running timer
+      function updateFpsDisplay(val) {
+        fpsValue.textContent = val + " fps";
+      }
+
+      function updateRunningFps(newFps) {
+        if (!_toggleState) return;
+        _toggleState.fps = Math.max(1, Math.floor(newFps));
+        if (_toggleState.paused) return;
+        // recreate interval preserving state
+        if (_toggleState.timer) clearInterval(_toggleState.timer);
+        const period = 1000 / _toggleState.fps;
+        _toggleState.timer = setInterval(() => {
+          if (!_toggleState) return;
+          _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+          _toggleState.ctx.drawImage(_toggleState.showB ? _toggleState.bmpB : _toggleState.bmpA, 0, 0);
+          _toggleState.showB = !_toggleState.showB;
+        }, period);
+      }
+
+      // pause/resume toggle
+      pauseBtn.addEventListener("click", () => {
+        if (!_toggleState) {
+          // nothing running — toggle label to Pause (no-op)
+          pauseBtn.textContent = "Pause";
+          return;
+        }
+        if (_toggleState.paused) {
+          // resume
+          _toggleState.paused = false;
+          updateRunningFps(_toggleState.fps);
+          // draw immediately to reflect resume
+          _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+          _toggleState.ctx.drawImage(_toggleState.showB ? _toggleState.bmpB : _toggleState.bmpA, 0, 0);
+          _toggleState.showB = !_toggleState.showB;
+          pauseBtn.textContent = "Pause";
+        } else {
+          // pause
+          _toggleState.paused = true;
+          if (_toggleState.timer) {
+            clearInterval(_toggleState.timer);
+            _toggleState.timer = null;
+          }
+          pauseBtn.textContent = "Resume";
+        }
+      });
+
+      // slider control
+      fpsSlider.addEventListener("input", (e) => {
+        const v = e.target.value;
+        updateFpsDisplay(v);
+        updateRunningFps(Number(v));
+      });
+
+      // initialize fps UI
+      updateFpsDisplay(fpsSlider.value);
+
+      // helper to get currently filled canvases (those with content)
+      function getFilledCanvases() {
+        return dropZones
+          .filter(z => z.canvas && z.canvas.width > 0 && z.canvas.height > 0)
+          .map(z => z.canvas);
+      }
+
+      // when user clicks Align, allow alignImages() to run then start toggling
+      alignBtn.addEventListener("click", () => {
+        stopToggle();
+        setTimeout(() => {
+          const filled = getFilledCanvases();
+          if (filled.length < 2) return;
+          const tgtCanvasForToggle = filled[1];
+          startToggleBetweenCanvases(tgtCanvasForToggle, animationCanvas, Number(fpsSlider.value)).catch((e) =>
+            console.error(e)
+          );
+        }, 300);
+      });
+
+      // stop toggle when user drops a new file into any dynamic dropzone
+      dropContainer.addEventListener("drop", stopToggle, true);
+      dropContainer.addEventListener("change", (e) => {
+        const t = e.target;
+        if (t && t.matches && t.matches('input[type="file"]')) stopToggle();
+      }, true);
+    </script>
+  </body>
+</html>
