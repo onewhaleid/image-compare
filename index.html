@@ -291,139 +291,102 @@
           alert("Load at least two images (fill two drop zones).");
           return;
         }
-        const srcCanvasSel = filled[0].canvas;
-        const tgtCanvasSel = filled[1].canvas;
-        let src = canvasToMat(srcCanvasSel);
-        let tgt = canvasToMat(tgtCanvasSel);
-        if (src.empty() || tgt.empty()) {
-          alert("Load both images (drop into the source and target areas).");
-          src.delete && src.delete();
-          tgt.delete && tgt.delete();
+
+        // Reference is the first filled image; align all others to it
+        const refCanvas = filled[0].canvas;
+        const others = filled.slice(1).map(z => z.canvas);
+
+        // Helper: compute warped canvas aligning srcCanvas to refCanvas
+        function warpToReference(srcCanvas, refCanvas) {
+          let src = canvasToMat(srcCanvas);
+          let ref = canvasToMat(refCanvas);
+          if (src.empty() || ref.empty()) {
+            src.delete && src.delete();
+            ref.delete && ref.delete();
+            return null;
+          }
+          let graySrc = new cv.Mat(), grayRef = new cv.Mat();
+          cv.cvtColor(src, graySrc, cv.COLOR_RGBA2GRAY);
+          cv.cvtColor(ref, grayRef, cv.COLOR_RGBA2GRAY);
+          let orb = new cv.ORB();
+          let kpSrc = new cv.KeyPointVector();
+          let kpRef = new cv.KeyPointVector();
+          let desSrc = new cv.Mat();
+          let desRef = new cv.Mat();
+          orb.detectAndCompute(graySrc, new cv.Mat(), kpSrc, desSrc);
+          orb.detectAndCompute(grayRef, new cv.Mat(), kpRef, desRef);
+
+          if (desSrc.rows === 0 || desRef.rows === 0) {
+            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, src, ref].forEach(x => x.delete && x.delete());
+            return null;
+          }
+
+          let bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+          let matches = new cv.DMatchVector();
+          bf.match(desSrc, desRef, matches);
+          const mArr = [];
+          for (let i = 0; i < matches.size(); i++) mArr.push(matches.get(i));
+          mArr.sort((a, b) => a.distance - b.distance);
+          const keep = Math.min(200, Math.max(10, Math.floor(mArr.length * 0.3)));
+          const goodMatches = new cv.DMatchVector();
+          for (let i = 0; i < keep; i++) goodMatches.push_back(mArr[i]);
+          if (goodMatches.size() < 4) {
+            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, src, ref].forEach(x => x.delete && x.delete());
+            return null;
+          }
+          let srcPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
+          let dstPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
+          for (let i = 0; i < goodMatches.size(); i++) {
+            const m = goodMatches.get(i);
+            const pS = kpSrc.get(m.queryIdx).pt;
+            const pR = kpRef.get(m.trainIdx).pt;
+            srcPts.floatPtr(i, 0)[0] = pS.x;
+            srcPts.floatPtr(i, 0)[1] = pS.y;
+            dstPts.floatPtr(i, 0)[0] = pR.x;
+            dstPts.floatPtr(i, 0)[1] = pR.y;
+          }
+          const mask = new cv.Mat();
+          const H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
+          if (H.empty()) {
+            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, srcPts, dstPts, mask, src, ref].forEach(x => x.delete && x.delete());
+            return null;
+          }
+          let warped = new cv.Mat();
+          const dsize = new cv.Size(ref.cols, ref.rows);
+          cv.warpPerspective(src, warped, H, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+
+          // Convert to canvas
+          const out = document.createElement('canvas');
+          matToCanvas(warped, out);
+
+          [graySrc, grayRef, orb, desSrc, desRef, bf, matches, srcPts, dstPts, mask, H, warped].forEach(x => x.delete && x.delete());
+          kpSrc.delete();
+          kpRef.delete();
+          src.delete();
+          ref.delete();
+          goodMatches.delete();
+          return out;
+        }
+
+        // Build frames: first the reference, then each warped to reference (skip nulls)
+        const frames = [refCanvas];
+        for (const c of others) {
+          const warpedCanvas = warpToReference(c, refCanvas);
+          if (warpedCanvas) frames.push(warpedCanvas);
+        }
+
+        // If only reference, nothing to animate
+        if (frames.length < 2) {
+          const ctx = animationCanvas.getContext('2d');
+          animationCanvas.width = refCanvas.width;
+          animationCanvas.height = refCanvas.height;
+          ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+          ctx.drawImage(refCanvas, 0, 0);
           return;
         }
 
-        let gray1 = new cv.Mat(),
-          gray2 = new cv.Mat();
-        cv.cvtColor(src, gray1, cv.COLOR_RGBA2GRAY);
-        cv.cvtColor(tgt, gray2, cv.COLOR_RGBA2GRAY);
-
-        let orb = new cv.ORB();
-        let kp1 = new cv.KeyPointVector();
-        let kp2 = new cv.KeyPointVector();
-        let des1 = new cv.Mat();
-        let des2 = new cv.Mat();
-        orb.detectAndCompute(gray1, new cv.Mat(), kp1, des1);
-        orb.detectAndCompute(gray2, new cv.Mat(), kp2, des2);
-
-        if (des1.rows === 0 || des2.rows === 0) {
-          alert("No features found in one of the images.");
-          [gray1, gray2, orb, kp1, kp2, des1, des2, src, tgt].forEach(
-            (x) => x.delete && x.delete()
-          );
-          return;
-        }
-
-        let bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
-        let matches = new cv.DMatchVector();
-        bf.match(des1, des2, matches);
-
-        const mArr = [];
-        for (let i = 0; i < matches.size(); i++) mArr.push(matches.get(i));
-        mArr.sort((a, b) => a.distance - b.distance);
-
-        const keep = Math.min(200, Math.max(10, Math.floor(mArr.length * 0.3)));
-        const goodMatches = new cv.DMatchVector();
-        for (let i = 0; i < keep; i++) goodMatches.push_back(mArr[i]);
-
-        if (goodMatches.size() < 4) {
-          alert("Not enough good matches for homography.");
-          [
-            gray1,
-            gray2,
-            orb,
-            kp1,
-            kp2,
-            des1,
-            des2,
-            bf,
-            matches,
-            goodMatches,
-            src,
-            tgt,
-          ].forEach((x) => x.delete && x.delete());
-          return;
-        }
-
-        let srcPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
-        let dstPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
-        for (let i = 0; i < goodMatches.size(); i++) {
-          const m = goodMatches.get(i);
-          const kp_1 = kp1.get(m.queryIdx).pt;
-          const kp_2 = kp2.get(m.trainIdx).pt;
-          srcPts.floatPtr(i, 0)[0] = kp_1.x;
-          srcPts.floatPtr(i, 0)[1] = kp_1.y;
-          dstPts.floatPtr(i, 0)[0] = kp_2.x;
-          dstPts.floatPtr(i, 0)[1] = kp_2.y;
-        }
-
-        const mask = new cv.Mat();
-        const H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
-
-        if (H.empty()) {
-          alert("Homography estimation failed.");
-          [
-            gray1,
-            gray2,
-            orb,
-            kp1,
-            kp2,
-            des1,
-            des2,
-            bf,
-            matches,
-            goodMatches,
-            srcPts,
-            dstPts,
-            mask,
-            src,
-            tgt,
-          ].forEach((x) => x.delete && x.delete());
-          return;
-        }
-
-        let warped = new cv.Mat();
-        const dsize = new cv.Size(tgt.cols, tgt.rows);
-        cv.warpPerspective(
-          src,
-          warped,
-          H,
-          dsize,
-          cv.INTER_LINEAR,
-          cv.BORDER_CONSTANT,
-          new cv.Scalar()
-        );
-
-        matToCanvas(warped, animationCanvas);
-
-        [
-          gray1,
-          gray2,
-          orb,
-          des1,
-          des2,
-          bf,
-          matches,
-          srcPts,
-          dstPts,
-          mask,
-          H,
-          warped,
-        ].forEach((x) => x.delete && x.delete());
-        kp1.delete();
-        kp2.delete();
-        goodMatches.delete();
-        src.delete();
-        tgt.delete();
+        // Start slideshow across all frames
+        startSlideshowFromCanvases(frames, Number(fpsSlider.value)).catch(e => console.error(e));
       }
 
       alignBtn.addEventListener("click", alignImages);
@@ -443,33 +406,34 @@
         pauseBtn.textContent = "Pause";
       }
 
-      async function startToggleBetweenCanvases(canvasA, canvasB, fps = 2) {
+      async function startSlideshowFromCanvases(canvases, fps = 2) {
         stopToggle();
         try {
-          const [bmpA, bmpB] = await Promise.all([
-            createImageBitmap(canvasA),
-            createImageBitmap(canvasB),
-          ]);
+          const bitmaps = await Promise.all(canvases.map(c => createImageBitmap(c)));
           const ctx = animationCanvas.getContext("2d");
-          animationCanvas.width = Math.max(bmpA.width, bmpB.width);
-          animationCanvas.height = Math.max(bmpA.height, bmpB.height);
+          const maxW = Math.max(...bitmaps.map(b => b.width));
+          const maxH = Math.max(...bitmaps.map(b => b.height));
+          animationCanvas.width = maxW;
+          animationCanvas.height = maxH;
 
           // initialize toggle state
           _toggleState = {
-            bitmaps: [bmpA, bmpB],
-            bmpA,
-            bmpB,
+            bitmaps,
             ctx,
             fps: Math.max(1, Math.floor(fps)),
             paused: false,
-            showB: true,
+            frameIndex: 0,
             timer: null,
           };
 
           function drawOnce() {
+            if (!_toggleState) return;
+            const { bitmaps } = _toggleState;
+            if (!bitmaps || bitmaps.length === 0) return;
             _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
-            _toggleState.ctx.drawImage(_toggleState.showB ? _toggleState.bmpB : _toggleState.bmpA, 0, 0);
-            _toggleState.showB = !_toggleState.showB;
+            const bmp = bitmaps[_toggleState.frameIndex % bitmaps.length];
+            _toggleState.ctx.drawImage(bmp, 0, 0);
+            _toggleState.frameIndex = (_toggleState.frameIndex + 1) % bitmaps.length;
           }
 
           function setTimer() {
@@ -503,9 +467,12 @@
         const period = 1000 / _toggleState.fps;
         _toggleState.timer = setInterval(() => {
           if (!_toggleState) return;
+          const { bitmaps } = _toggleState;
+          if (!bitmaps || bitmaps.length === 0) return;
           _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
-          _toggleState.ctx.drawImage(_toggleState.showB ? _toggleState.bmpB : _toggleState.bmpA, 0, 0);
-          _toggleState.showB = !_toggleState.showB;
+          const bmp = bitmaps[_toggleState.frameIndex % bitmaps.length];
+          _toggleState.ctx.drawImage(bmp, 0, 0);
+          _toggleState.frameIndex = (_toggleState.frameIndex + 1) % bitmaps.length;
         }, period);
       }
 
@@ -522,8 +489,9 @@
           updateRunningFps(_toggleState.fps);
           // draw immediately to reflect resume
           _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
-          _toggleState.ctx.drawImage(_toggleState.showB ? _toggleState.bmpB : _toggleState.bmpA, 0, 0);
-          _toggleState.showB = !_toggleState.showB;
+          const bmp = _toggleState.bitmaps[_toggleState.frameIndex % _toggleState.bitmaps.length];
+          _toggleState.ctx.drawImage(bmp, 0, 0);
+          _toggleState.frameIndex = (_toggleState.frameIndex + 1) % _toggleState.bitmaps.length;
           pauseBtn.textContent = "Pause";
         } else {
           // pause
@@ -553,17 +521,12 @@
           .map(z => z.canvas);
       }
 
-      // when user clicks Align, allow alignImages() to run then start toggling
+      // when user clicks Align, run alignment which will start slideshow
       alignBtn.addEventListener("click", () => {
         stopToggle();
         setTimeout(() => {
-          const filled = getFilledCanvases();
-          if (filled.length < 2) return;
-          const tgtCanvasForToggle = filled[1];
-          startToggleBetweenCanvases(tgtCanvasForToggle, animationCanvas, Number(fpsSlider.value)).catch((e) =>
-            console.error(e)
-          );
-        }, 300);
+          alignImages();
+        }, 50);
       });
 
       // stop toggle when user drops a new file into any dynamic dropzone
