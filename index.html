@@ -424,29 +424,38 @@
             paused: false,
             frameIndex: 0,
             timer: null,
+            view: { scale: 1, tx: 0, ty: 0 },
           };
 
-          function drawOnce() {
+          function drawCurrentFrame(advance = false) {
             if (!_toggleState) return;
-            const { bitmaps } = _toggleState;
+            const { bitmaps, view } = _toggleState;
             if (!bitmaps || bitmaps.length === 0) return;
-            _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
             const bmp = bitmaps[_toggleState.frameIndex % bitmaps.length];
-            _toggleState.ctx.drawImage(bmp, 0, 0);
-            _toggleState.frameIndex = (_toggleState.frameIndex + 1) % bitmaps.length;
+            const ctxLocal = _toggleState.ctx;
+            ctxLocal.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+            ctxLocal.save();
+            ctxLocal.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+            ctxLocal.drawImage(bmp, 0, 0);
+            ctxLocal.restore();
+            if (advance) {
+              _toggleState.frameIndex = (_toggleState.frameIndex + 1) % bitmaps.length;
+            }
           }
+
+          _toggleState.drawCurrent = (advance = false) => drawCurrentFrame(advance);
 
           function setTimer() {
             if (!_toggleState) return;
             if (_toggleState.timer) clearInterval(_toggleState.timer);
             const period = 1000 / Math.max(1, _toggleState.fps);
             _toggleState.timer = setInterval(() => {
-              drawOnce();
+              _toggleState.drawCurrent(true);
             }, period);
           }
 
           // draw initial frame and start interval
-          drawOnce();
+          _toggleState.drawCurrent(true);
           setTimer();
         } catch (e) {
           console.error("Failed to start toggle:", e);
@@ -467,12 +476,7 @@
         const period = 1000 / _toggleState.fps;
         _toggleState.timer = setInterval(() => {
           if (!_toggleState) return;
-          const { bitmaps } = _toggleState;
-          if (!bitmaps || bitmaps.length === 0) return;
-          _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
-          const bmp = bitmaps[_toggleState.frameIndex % bitmaps.length];
-          _toggleState.ctx.drawImage(bmp, 0, 0);
-          _toggleState.frameIndex = (_toggleState.frameIndex + 1) % bitmaps.length;
+          _toggleState.drawCurrent(true);
         }, period);
       }
 
@@ -488,10 +492,7 @@
           _toggleState.paused = false;
           updateRunningFps(_toggleState.fps);
           // draw immediately to reflect resume
-          _toggleState.ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
-          const bmp = _toggleState.bitmaps[_toggleState.frameIndex % _toggleState.bitmaps.length];
-          _toggleState.ctx.drawImage(bmp, 0, 0);
-          _toggleState.frameIndex = (_toggleState.frameIndex + 1) % _toggleState.bitmaps.length;
+          _toggleState.drawCurrent(true);
           pauseBtn.textContent = "Pause";
         } else {
           // pause
@@ -535,6 +536,99 @@
         const t = e.target;
         if (t && t.matches && t.matches('input[type="file"]')) stopToggle();
       }, true);
+
+      // Zoom & Pan interactions for Composite canvas
+      (function enableZoomPan() {
+        let isPanning = false;
+        let lastX = 0, lastY = 0;
+        const maxScale = 10;
+
+        function getView() {
+          if (!_toggleState) return null;
+          if (!_toggleState.view) _toggleState.view = { scale: 1, tx: 0, ty: 0 };
+          return _toggleState.view;
+        }
+
+        function computeMinScale() {
+          if (!_toggleState || !_toggleState.bitmaps || _toggleState.bitmaps.length === 0) return 0.1;
+          const idx = _toggleState.frameIndex % _toggleState.bitmaps.length;
+          const bmp = _toggleState.bitmaps[idx];
+          if (!bmp) return 0.1;
+          const scaleX = animationCanvas.width / bmp.width;
+          const scaleY = animationCanvas.height / bmp.height;
+          // Fit-to-canvas minimum: don't allow zooming out smaller than fit
+          return Math.min(scaleX, scaleY);
+        }
+
+        animationCanvas.addEventListener('wheel', (e) => {
+          // Zoom around mouse position
+          const view = getView();
+          if (!view) return;
+          e.preventDefault();
+          const rect = animationCanvas.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+
+          const scaleFactor = e.deltaY < 0 ? 1.1 : 0.9;
+          const prevScale = view.scale;
+          let newScale = prevScale * scaleFactor;
+          const minScale = computeMinScale();
+          newScale = Math.min(maxScale, Math.max(minScale, newScale));
+          if (newScale === prevScale) return;
+
+          const imgX = (mx - view.tx) / prevScale;
+          const imgY = (my - view.ty) / prevScale;
+          view.scale = newScale;
+          view.tx = mx - imgX * newScale;
+          view.ty = my - imgY * newScale;
+
+          if (_toggleState && _toggleState.drawCurrent) {
+            _toggleState.drawCurrent(false);
+          } else {
+            const ctx = animationCanvas.getContext('2d');
+            ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+          }
+        }, { passive: false });
+
+        animationCanvas.addEventListener('mousedown', (e) => {
+          const view = getView();
+          if (!view) return;
+          isPanning = true;
+          lastX = e.clientX;
+          lastY = e.clientY;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+          if (!isPanning) return;
+          const view = getView();
+          if (!view) return;
+          const dx = e.clientX - lastX;
+          const dy = e.clientY - lastY;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          view.tx += dx;
+          view.ty += dy;
+          if (_toggleState && _toggleState.drawCurrent) {
+            _toggleState.drawCurrent(false);
+          }
+        });
+
+        window.addEventListener('mouseup', () => { isPanning = false; });
+        animationCanvas.addEventListener('mouseleave', () => { isPanning = false; });
+
+        // Double-click to reset view
+        animationCanvas.addEventListener('dblclick', () => {
+          const view = getView();
+          if (!view) return;
+          const minScale = computeMinScale();
+          view.scale = minScale;
+          view.tx = 0;
+          view.ty = 0;
+          if (_toggleState && _toggleState.drawCurrent) {
+            _toggleState.drawCurrent(false);
+          }
+        });
+      })();
     </script>
   </body>
 </html>
