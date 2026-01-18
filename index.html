@@ -176,6 +176,15 @@
 
       const animationCanvas = document.getElementById("animation");
 
+      // Set animation canvas size to fit viewport width while preserving aspect ratio
+      function setCanvasViewportForSize(imgW, imgH) {
+        const bodyMarginX = 36; // approx left+right margin from body styles
+        const availW = Math.max(300, Math.floor(document.documentElement.clientWidth - bodyMarginX));
+        const scale = Math.min(1, availW / imgW);
+        animationCanvas.width = Math.round(imgW * scale);
+        animationCanvas.height = Math.round(imgH * scale);
+      }
+
       // Utility to prevent default drag behavior
       function preventDefaults(e) {
         e.preventDefault();
@@ -219,13 +228,22 @@
         if (!file) return;
         const img = new Image();
         img.onload = () => {
+          // Create a hidden full-resolution canvas for processing and animation
+          const fullCanvas = document.createElement('canvas');
+          fullCanvas.width = img.width;
+          fullCanvas.height = img.height;
+          const fullCtx = fullCanvas.getContext('2d');
+          fullCtx.drawImage(img, 0, 0);
+
+          // Draw a scaled preview into the visible dropzone canvas for UI
           const ctx = canvas.getContext("2d");
-          // choose a sensible max to avoid huge canvases
-          canvas.width = Math.min(img.width, 800);
-          canvas.height = Math.min(img.height, 600);
+          const maxPreviewW = 800;
+          const maxPreviewH = 600;
+          canvas.width = Math.min(img.width, maxPreviewW);
+          canvas.height = Math.min(img.height, maxPreviewH);
           const scale = Math.min(canvas.width / img.width, canvas.height / img.height, 1);
-          const w = img.width * scale;
-          const h = img.height * scale;
+          const w = Math.round(img.width * scale);
+          const h = Math.round(img.height * scale);
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0, w, h);
 
@@ -236,6 +254,10 @@
           // mark as filled and ensure there is always an extra empty slot
           dropElem.classList.add("filled");
           ensureExtraSlot();
+
+          // Attach full-res canvas to the corresponding dropzone entry
+          const dz = dropZones.find(z => z.canvas === canvas);
+          if (dz) dz.fullCanvas = fullCanvas;
 
           URL.revokeObjectURL(img.src);
           callback && callback();
@@ -281,23 +303,38 @@
         ctx.putImageData(img, 0, 0);
       }
 
+      // Create a scaled copy of a canvas limited by maxDim, preserving aspect ratio.
+      // Returns { canvas, scale }, where scale is the factor applied to original.
+      function makeScaledCanvas(sourceCanvas, maxDim = 800) {
+        const s = Math.min(maxDim / sourceCanvas.width, maxDim / sourceCanvas.height, 1);
+        if (s === 1) return { canvas: sourceCanvas, scale: 1 };
+        const c = document.createElement('canvas');
+        c.width = Math.round(sourceCanvas.width * s);
+        c.height = Math.round(sourceCanvas.height * s);
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(sourceCanvas, 0, 0, c.width, c.height);
+        return { canvas: c, scale: s };
+      }
+
       function alignImages() {
         if (typeof cv === "undefined") {
           alert("OpenCV.js not ready");
           return;
         }
-        const filled = dropZones.filter(z => z.canvas.width > 0 && z.canvas.height > 0);
+        const filled = dropZones.filter(z => z.fullCanvas && z.fullCanvas.width > 0 && z.fullCanvas.height > 0);
         if (filled.length < 2) {
           alert("Load at least two images (fill two drop zones).");
           return;
         }
 
         // Reference is the first filled image; align all others to it
-        const refCanvas = filled[0].canvas;
-        const others = filled.slice(1).map(z => z.canvas);
+        const refCanvas = filled[0].fullCanvas;
+        const others = filled.slice(1).map(z => z.fullCanvas);
 
         // Helper: compute warped canvas aligning srcCanvas to refCanvas
         function warpToReference(srcCanvas, refCanvas) {
+          // Full-resolution mats for final warping
           let src = canvasToMat(srcCanvas);
           let ref = canvasToMat(refCanvas);
           if (src.empty() || ref.empty()) {
@@ -305,9 +342,14 @@
             ref.delete && ref.delete();
             return null;
           }
+          // Downscale for feature detection/matching to improve performance
+          const scaledSrc = makeScaledCanvas(srcCanvas, 800);
+          const scaledRef = makeScaledCanvas(refCanvas, 800);
+          let srcSmall = canvasToMat(scaledSrc.canvas);
+          let refSmall = canvasToMat(scaledRef.canvas);
           let graySrc = new cv.Mat(), grayRef = new cv.Mat();
-          cv.cvtColor(src, graySrc, cv.COLOR_RGBA2GRAY);
-          cv.cvtColor(ref, grayRef, cv.COLOR_RGBA2GRAY);
+          cv.cvtColor(srcSmall, graySrc, cv.COLOR_RGBA2GRAY);
+          cv.cvtColor(refSmall, grayRef, cv.COLOR_RGBA2GRAY);
           let orb = new cv.ORB();
           let kpSrc = new cv.KeyPointVector();
           let kpRef = new cv.KeyPointVector();
@@ -317,7 +359,7 @@
           orb.detectAndCompute(grayRef, new cv.Mat(), kpRef, desRef);
 
           if (desSrc.rows === 0 || desRef.rows === 0) {
-            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, src, ref].forEach(x => x.delete && x.delete());
+            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, srcSmall, refSmall, src, ref].forEach(x => x.delete && x.delete());
             return null;
           }
 
@@ -331,7 +373,7 @@
           const goodMatches = new cv.DMatchVector();
           for (let i = 0; i < keep; i++) goodMatches.push_back(mArr[i]);
           if (goodMatches.size() < 4) {
-            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, src, ref].forEach(x => x.delete && x.delete());
+            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, srcSmall, refSmall, src, ref].forEach(x => x.delete && x.delete());
             return null;
           }
           let srcPts = new cv.Mat(goodMatches.size(), 1, cv.CV_32FC2);
@@ -348,18 +390,35 @@
           const mask = new cv.Mat();
           const H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
           if (H.empty()) {
-            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, srcPts, dstPts, mask, src, ref].forEach(x => x.delete && x.delete());
+            [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, srcPts, dstPts, mask, srcSmall, refSmall, src, ref].forEach(x => x.delete && x.delete());
             return null;
           }
+          // Lift homography from small scale to full resolution
+          const sSrc = scaledSrc.scale; // small = sSrc * full
+          const sRef = scaledRef.scale; // small = sRef * full
+          const h = H.data64F || H.data32F;
+          const HfullArr = new Float64Array(9);
+          HfullArr[0] = (1 / sRef) * h[0] * sSrc;
+          HfullArr[1] = (1 / sRef) * h[1] * sSrc;
+          HfullArr[2] = (1 / sRef) * h[2];
+          HfullArr[3] = (1 / sRef) * h[3] * sSrc;
+          HfullArr[4] = (1 / sRef) * h[4] * sSrc;
+          HfullArr[5] = (1 / sRef) * h[5];
+          HfullArr[6] = h[6] * sSrc;
+          HfullArr[7] = h[7] * sSrc;
+          HfullArr[8] = h[8];
+          const Hfull = cv.matFromArray(3, 3, cv.CV_64F, HfullArr);
+
+          // Warp full-resolution src to full-resolution ref size
           let warped = new cv.Mat();
           const dsize = new cv.Size(ref.cols, ref.rows);
-          cv.warpPerspective(src, warped, H, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+          cv.warpPerspective(src, warped, Hfull, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
 
           // Convert to canvas
           const out = document.createElement('canvas');
           matToCanvas(warped, out);
 
-          [graySrc, grayRef, orb, desSrc, desRef, bf, matches, srcPts, dstPts, mask, H, warped].forEach(x => x.delete && x.delete());
+          [graySrc, grayRef, orb, desSrc, desRef, bf, matches, srcPts, dstPts, mask, H, Hfull, srcSmall, refSmall, warped].forEach(x => x.delete && x.delete());
           kpSrc.delete();
           kpRef.delete();
           src.delete();
@@ -378,8 +437,7 @@
         // If only reference, nothing to animate
         if (frames.length < 2) {
           const ctx = animationCanvas.getContext('2d');
-          animationCanvas.width = refCanvas.width;
-          animationCanvas.height = refCanvas.height;
+          setCanvasViewportForSize(refCanvas.width, refCanvas.height);
           ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
           ctx.drawImage(refCanvas, 0, 0);
           return;
@@ -413,8 +471,7 @@
           const ctx = animationCanvas.getContext("2d");
           const maxW = Math.max(...bitmaps.map(b => b.width));
           const maxH = Math.max(...bitmaps.map(b => b.height));
-          animationCanvas.width = maxW;
-          animationCanvas.height = maxH;
+          setCanvasViewportForSize(maxW, maxH);
 
           // initialize toggle state
           _toggleState = {
@@ -436,6 +493,8 @@
             ctxLocal.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
             ctxLocal.save();
             ctxLocal.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+            // Disable smoothing to keep native pixel detail when zooming in
+            ctxLocal.imageSmoothingEnabled = false;
             ctxLocal.drawImage(bmp, 0, 0);
             ctxLocal.restore();
             if (advance) {
@@ -457,6 +516,20 @@
           // draw initial frame and start interval
           _toggleState.drawCurrent(true);
           setTimer();
+
+          // Adjust viewport on window resize and keep view scale within min
+          const onResize = () => {
+            if (!_toggleState) return;
+            setCanvasViewportForSize(maxW, maxH);
+            const bitmapsLocal = _toggleState.bitmaps;
+            const bmp = bitmapsLocal[_toggleState.frameIndex % bitmapsLocal.length];
+            const minScale = Math.min(animationCanvas.width / bmp.width, animationCanvas.height / bmp.height);
+            if (_toggleState.view) {
+              _toggleState.view.scale = Math.max(_toggleState.view.scale, minScale);
+            }
+            _toggleState.drawCurrent(false);
+          };
+          window.addEventListener('resize', onResize);
         } catch (e) {
           console.error("Failed to start toggle:", e);
         }
