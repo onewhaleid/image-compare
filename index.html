@@ -481,14 +481,30 @@
             paused: false,
             frameIndex: 0,
             timer: null,
-            view: { scale: 1, tx: 0, ty: 0 },
+            // autoFit keeps the image fully in view unless the user pans/zooms
+            view: { scale: 1, tx: 0, ty: 0, autoFit: true },
           };
+
+          function fitViewToBitmap(bmp) {
+            if (!_toggleState || !bmp) return;
+            const fitScale = Math.min(
+              animationCanvas.width / bmp.width,
+              animationCanvas.height / bmp.height
+            );
+            const view = _toggleState.view;
+            view.scale = fitScale;
+            view.tx = (animationCanvas.width - bmp.width * fitScale) / 2;
+            view.ty = (animationCanvas.height - bmp.height * fitScale) / 2;
+          }
 
           function drawCurrentFrame(advance = false) {
             if (!_toggleState) return;
             const { bitmaps, view } = _toggleState;
             if (!bitmaps || bitmaps.length === 0) return;
             const bmp = bitmaps[_toggleState.frameIndex % bitmaps.length];
+            if (view.autoFit) {
+              fitViewToBitmap(bmp);
+            }
             const ctxLocal = _toggleState.ctx;
             ctxLocal.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
             ctxLocal.save();
@@ -514,6 +530,7 @@
           }
 
           // draw initial frame and start interval
+          fitViewToBitmap(bitmaps[0]);
           _toggleState.drawCurrent(true);
           setTimer();
 
@@ -525,7 +542,11 @@
             const bmp = bitmapsLocal[_toggleState.frameIndex % bitmapsLocal.length];
             const minScale = Math.min(animationCanvas.width / bmp.width, animationCanvas.height / bmp.height);
             if (_toggleState.view) {
-              _toggleState.view.scale = Math.max(_toggleState.view.scale, minScale);
+              if (_toggleState.view.autoFit) {
+                fitViewToBitmap(bmp);
+              } else {
+                _toggleState.view.scale = Math.max(_toggleState.view.scale, minScale);
+              }
             }
             _toggleState.drawCurrent(false);
           };
@@ -637,6 +658,7 @@
           // Zoom around mouse position
           const view = getView();
           if (!view) return;
+          view.autoFit = false; // user manually zoomed
           e.preventDefault();
           const rect = animationCanvas.getBoundingClientRect();
           const mx = e.clientX - rect.left;
@@ -666,6 +688,7 @@
         animationCanvas.addEventListener('mousedown', (e) => {
           const view = getView();
           if (!view) return;
+          view.autoFit = false; // user started panning
           isPanning = true;
           lastX = e.clientX;
           lastY = e.clientY;
@@ -694,9 +717,19 @@
           const view = getView();
           if (!view) return;
           const minScale = computeMinScale();
+          const idx = _toggleState && _toggleState.bitmaps
+            ? _toggleState.frameIndex % _toggleState.bitmaps.length
+            : 0;
+          const bmp = _toggleState && _toggleState.bitmaps ? _toggleState.bitmaps[idx] : null;
           view.scale = minScale;
-          view.tx = 0;
-          view.ty = 0;
+          if (bmp) {
+            view.tx = (animationCanvas.width - bmp.width * minScale) / 2;
+            view.ty = (animationCanvas.height - bmp.height * minScale) / 2;
+          } else {
+            view.tx = 0;
+            view.ty = 0;
+          }
+          view.autoFit = true; // return to auto-fit mode
           if (_toggleState && _toggleState.drawCurrent) {
             _toggleState.drawCurrent(false);
           }
