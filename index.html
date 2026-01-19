@@ -36,6 +36,10 @@
       button {
         padding: 6px 10px;
       }
+      input[type="text"] {
+        padding: 6px 8px;
+        min-width: 180px;
+      }
 
       /* Drag & drop styles */
       .dropzone {
@@ -109,6 +113,12 @@
         <button id="pauseBtn">Play</button>
       </div>
 
+      <div class="fps-control">
+        <label for="gifName">GIF filename:</label>
+        <input id="gifName" type="text" placeholder="animation.gif" />
+        <button id="exportGifBtn">Export GIF</button>
+      </div>
+
       <!-- Per-dropzone hidden inputs are created dynamically -->
     </div>
 
@@ -124,6 +134,7 @@
       src="https://docs.opencv.org/4.x/opencv.js"
       onload="onOpenCvReady();"
     ></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
 
     <script>
       let srcImg = null,
@@ -132,6 +143,11 @@
       const dropContainer = document.getElementById("dropContainer");
       const dropZones = [];
       const alignBtn = document.getElementById("alignBtn");
+
+      const gifNameInput = document.getElementById("gifName");
+      const exportGifBtn = document.getElementById("exportGifBtn");
+      let gifNameAutofill = true;
+      let firstImageStem = null;
 
       // FPS controls
       const fpsSlider = document.getElementById("fpsSlider");
@@ -171,6 +187,21 @@
       function ensureExtraSlot() {
         if (allDropzonesFilled()) {
           createDropzone();
+        }
+      }
+
+      function stemFromFilename(name) {
+        if (!name) return "animation";
+        const lastDot = name.lastIndexOf('.');
+        return lastDot > 0 ? name.slice(0, lastDot) : name;
+      }
+
+      function setDefaultGifName(stem) {
+        if (!gifNameInput) return;
+        const trimmed = gifNameInput.value.trim();
+        if (gifNameAutofill || trimmed.length === 0) {
+          gifNameInput.value = `${stem || "animation"}.gif`;
+          gifNameAutofill = true;
         }
       }
 
@@ -224,6 +255,12 @@
       createDropzone();
       createDropzone();
 
+      if (gifNameInput) {
+        gifNameInput.addEventListener('input', () => {
+          gifNameAutofill = false;
+        });
+      }
+
       function loadFileToCanvas(file, canvas, dropElem, callback) {
         if (!file) return;
         const img = new Image();
@@ -254,6 +291,14 @@
           // mark as filled and ensure there is always an extra empty slot
           dropElem.classList.add("filled");
           ensureExtraSlot();
+
+          // auto-set GIF name stem from the first loaded image
+          if (!firstImageStem && file && file.name) {
+            firstImageStem = stemFromFilename(file.name);
+          }
+          if (firstImageStem) {
+            setDefaultGifName(firstImageStem);
+          }
 
           // Attach full-res canvas to the corresponding dropzone entry
           const dz = dropZones.find(z => z.canvas === canvas);
@@ -483,19 +528,26 @@
             timer: null,
             // autoFit keeps the image fully in view unless the user pans/zooms
             view: { scale: 1, tx: 0, ty: 0, autoFit: true },
+            frameDelay: Math.max(20, Math.round(1000 / Math.max(1, Math.floor(fps))))
           };
 
-          function fitViewToBitmap(bmp) {
-            if (!_toggleState || !bmp) return;
+          function fitViewToBitmap(bmp, returnOnly = false) {
+            if (!_toggleState || !bmp) return null;
             const fitScale = Math.min(
               animationCanvas.width / bmp.width,
               animationCanvas.height / bmp.height
             );
             const view = _toggleState.view;
-            view.scale = fitScale;
-            view.tx = (animationCanvas.width - bmp.width * fitScale) / 2;
-            view.ty = (animationCanvas.height - bmp.height * fitScale) / 2;
+            const tx = (animationCanvas.width - bmp.width * fitScale) / 2;
+            const ty = (animationCanvas.height - bmp.height * fitScale) / 2;
+            if (!returnOnly) {
+              view.scale = fitScale;
+              view.tx = tx;
+              view.ty = ty;
+            }
+            return { scale: fitScale, tx, ty };
           }
+          _toggleState.fitViewToBitmap = fitViewToBitmap;
 
           function drawCurrentFrame(advance = false) {
             if (!_toggleState) return;
@@ -523,7 +575,7 @@
           function setTimer() {
             if (!_toggleState) return;
             if (_toggleState.timer) clearInterval(_toggleState.timer);
-            const period = 1000 / Math.max(1, _toggleState.fps);
+            const period = _toggleState.frameDelay;
             _toggleState.timer = setInterval(() => {
               _toggleState.drawCurrent(true);
             }, period);
@@ -564,14 +616,94 @@
       function updateRunningFps(newFps) {
         if (!_toggleState) return;
         _toggleState.fps = Math.max(1, Math.floor(newFps));
+        _toggleState.frameDelay = Math.max(20, Math.round(1000 / _toggleState.fps));
         if (_toggleState.paused) return;
         // recreate interval preserving state
         if (_toggleState.timer) clearInterval(_toggleState.timer);
-        const period = 1000 / _toggleState.fps;
+        const period = _toggleState.frameDelay;
         _toggleState.timer = setInterval(() => {
           if (!_toggleState) return;
           _toggleState.drawCurrent(true);
         }, period);
+      }
+
+      async function exportGifFromComposite() {
+        console.log("exportGifFromComposite called");
+        if (typeof GIF === "undefined") {
+          console.error("GIF library not loaded");
+          alert("GIF library not loaded yet.");
+          return;
+        }
+        console.log("GIF library loaded, _toggleState:", _toggleState);
+        if (!_toggleState || !_toggleState.bitmaps || _toggleState.bitmaps.length === 0) {
+          alert("Run Align first so the composite has frames to export.");
+          return;
+        }
+
+        const rawName = (gifNameInput && gifNameInput.value.trim()) || `${firstImageStem || "animation"}.gif`;
+        const filename = rawName.toLowerCase().endsWith('.gif') ? rawName : `${rawName}.gif`;
+        const delay = _toggleState.frameDelay || Math.max(20, Math.round(1000 / Math.max(1, Number(fpsSlider.value) || 2)));
+        console.log("Export filename:", filename, "delay:", delay, "num frames:", _toggleState.bitmaps.length);
+
+        const offscreen = document.createElement('canvas');
+        offscreen.width = animationCanvas.width;
+        offscreen.height = animationCanvas.height;
+        const offctx = offscreen.getContext('2d');
+        const gif = new GIF({
+          workers: 2,
+          quality: 10,
+          workerScript: 'gif.worker.js'
+        });
+        console.log("GIF object created");
+
+        const view = _toggleState.view || { scale: 1, tx: 0, ty: 0, autoFit: true };
+        const fitHelper = _toggleState.fitViewToBitmap;
+
+        _toggleState.bitmaps.forEach((bmp, idx) => {
+          if (!bmp) return;
+          let scale = view.scale;
+          let tx = view.tx;
+          let ty = view.ty;
+          if (view.autoFit && typeof fitHelper === 'function') {
+            const res = fitHelper(bmp, true);
+            if (res) {
+              scale = res.scale;
+              tx = res.tx;
+              ty = res.ty;
+            }
+          }
+          offctx.setTransform(1, 0, 0, 1, 0, 0);
+          offctx.clearRect(0, 0, offscreen.width, offscreen.height);
+          offctx.setTransform(scale, 0, 0, scale, tx, ty);
+          offctx.imageSmoothingEnabled = false;
+          offctx.drawImage(bmp, 0, 0);
+          gif.addFrame(offscreen, { copy: true, delay });
+          console.log("Added frame", idx);
+        });
+        console.log("All frames added, starting render");
+
+        gif.on('finished', (blob) => {
+          console.log("GIF finished, blob size:", blob.size);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          console.log("Triggering download for:", filename);
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        });
+
+        gif.on('error', (err) => {
+          console.error('GIF export failed:', err);
+          alert('Failed to export GIF: ' + err);
+        });
+
+        gif.on('progress', (progress) => {
+          console.log("GIF progress:", progress);
+        });
+
+        gif.render();
+        console.log("gif.render() called");
       }
 
       // pause/resume toggle
@@ -608,6 +740,9 @@
 
       // initialize fps UI
       updateFpsDisplay(fpsSlider.value);
+
+      // Export GIF button listener
+      exportGifBtn.addEventListener("click", exportGifFromComposite);
 
       // helper to get currently filled canvases (those with content)
       function getFilledCanvases() {
