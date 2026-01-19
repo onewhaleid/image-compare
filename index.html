@@ -91,12 +91,35 @@
       .fps-control input[type="range"] {
         width: 150px;
       }
+
+      /* Canvas container with resize handle */
+      .canvas-container {
+        position: relative;
+        display: inline-block;
+        /* match canvas border visually */
+        border: 1px solid #999;
+      }
+      .canvas-container canvas {
+        display: block; /* remove inline gaps */
+      }
+      .resize-handle {
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        right: 0;
+        bottom: 0;
+        cursor: se-resize;
+        background: linear-gradient(135deg, rgba(0,0,0,0) 50%, rgba(0,0,0,0.15) 50%),
+                    linear-gradient(135deg, rgba(0,0,0,0) 70%, rgba(0,0,0,0.15) 70%);
+        background-size: 100% 100%, 100% 100%;
+        background-repeat: no-repeat;
+      }
     </style>
   </head>
   <body>
     <div class="controls">
       <div>
-        <div><strong>Images (drop here)</strong></div>
+        <div><strong>Input images</strong></div>
         <div id="dropContainer" class="row"></div>
       </div>
 
@@ -126,7 +149,10 @@
          Only the Matches/Overlay canvas remains. -->
       <div><strong>Composite</strong></div>
     <div class="row">
-      <canvas id="animation" width="800" height="300"></canvas>
+      <div class="canvas-container" id="animationContainer">
+        <canvas id="animation" width="800" height="300"></canvas>
+        <div class="resize-handle" id="resizeHandle" title="Resize"></div>
+      </div>
     </div>
 
     <script
@@ -206,14 +232,19 @@
       }
 
       const animationCanvas = document.getElementById("animation");
+      const animationContainer = document.getElementById("animationContainer");
+      const resizeHandle = document.getElementById("resizeHandle");
 
       // Set animation canvas size to fit viewport width while preserving aspect ratio
       function setCanvasViewportForSize(imgW, imgH) {
         const bodyMarginX = 36; // approx left+right margin from body styles
         const availW = Math.max(300, Math.floor(document.documentElement.clientWidth - bodyMarginX));
         const scale = Math.min(1, availW / imgW);
-        animationCanvas.width = Math.round(imgW * scale);
-        animationCanvas.height = Math.round(imgH * scale);
+        // Only auto-size if user has not resized manually
+        if (!_toggleState || !_toggleState.userSized) {
+          animationCanvas.width = Math.round(imgW * scale);
+          animationCanvas.height = Math.round(imgH * scale);
+        }
       }
 
       // Utility to prevent default drag behavior
@@ -589,7 +620,10 @@
           // Adjust viewport on window resize and keep view scale within min
           const onResize = () => {
             if (!_toggleState) return;
-            setCanvasViewportForSize(maxW, maxH);
+            // Respect manual canvas sizing
+            if (!_toggleState.userSized) {
+              setCanvasViewportForSize(maxW, maxH);
+            }
             const bitmapsLocal = _toggleState.bitmaps;
             const bmp = bitmapsLocal[_toggleState.frameIndex % bitmapsLocal.length];
             const minScale = Math.min(animationCanvas.width / bmp.width, animationCanvas.height / bmp.height);
@@ -868,6 +902,74 @@
           if (_toggleState && _toggleState.drawCurrent) {
             _toggleState.drawCurrent(false);
           }
+        });
+      })();
+
+      // Enable manual resizing via bottom-right handle
+      (function enableCanvasResize() {
+        if (!resizeHandle) return;
+        let resizing = false;
+        let startX = 0, startY = 0;
+        let startW = 0, startH = 0;
+
+        const MIN_W = 150;
+        const MIN_H = 100;
+
+        function redrawAfterResize() {
+          if (_toggleState) {
+            // Mark as user-sized to prevent auto-resize
+            _toggleState.userSized = true;
+            // Refresh context in case canvas was resized
+            _toggleState.ctx = animationCanvas.getContext('2d');
+            const bitmaps = _toggleState.bitmaps;
+            if (bitmaps && bitmaps.length) {
+              const bmp = bitmaps[_toggleState.frameIndex % bitmaps.length];
+              const minScale = Math.min(animationCanvas.width / bmp.width, animationCanvas.height / bmp.height);
+              if (_toggleState.view) {
+                if (_toggleState.view.autoFit) {
+                  // Fit view to new canvas size
+                  if (typeof _toggleState.fitViewToBitmap === 'function') {
+                    _toggleState.fitViewToBitmap(bmp);
+                  }
+                } else {
+                  _toggleState.view.scale = Math.max(_toggleState.view.scale, minScale);
+                }
+              }
+              _toggleState.drawCurrent(false);
+            }
+          } else {
+            // No slideshow; clear and leave blank
+            const ctx = animationCanvas.getContext('2d');
+            ctx.clearRect(0, 0, animationCanvas.width, animationCanvas.height);
+          }
+        }
+
+        resizeHandle.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          resizing = true;
+          startX = e.clientX;
+          startY = e.clientY;
+          startW = animationCanvas.width;
+          startH = animationCanvas.height;
+          document.body.style.cursor = 'se-resize';
+        });
+
+        window.addEventListener('mousemove', (e) => {
+          if (!resizing) return;
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          const newW = Math.max(MIN_W, startW + dx);
+          const newH = Math.max(MIN_H, startH + dy);
+          // Apply new size to canvas
+          animationCanvas.width = Math.round(newW);
+          animationCanvas.height = Math.round(newH);
+          redrawAfterResize();
+        }, { passive: true });
+
+        window.addEventListener('mouseup', () => {
+          if (!resizing) return;
+          resizing = false;
+          document.body.style.cursor = '';
         });
       })();
     </script>
