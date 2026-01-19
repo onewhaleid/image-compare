@@ -8,6 +8,24 @@
         font-family: Arial, sans-serif;
         margin: 18px;
       }
+      .layout {
+        display: flex;
+        gap: 18px;
+        align-items: flex-start;
+      }
+      .left-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-width: 170px;
+      }
+      .right-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        flex: 1;
+        min-width: 0;
+      }
       .row {
         display: flex;
         gap: 12px;
@@ -25,8 +43,9 @@
         max-width: 100%;
       }
       .controls {
-        margin-bottom: 12px;
+        margin-bottom: 0;
         display: flex;
+        flex-wrap: wrap;
         gap: 12px;
         align-items: center;
       }
@@ -82,6 +101,13 @@
         width: 100%;
       }
 
+      /* Vertical stack of dropzones */
+      #dropContainer {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
       /* slider styling */
       .fps-control {
         display: flex;
@@ -117,41 +143,45 @@
     </style>
   </head>
   <body>
-    <div class="controls">
-      <div>
+    <div class="layout">
+      <div class="left-panel">
         <div><strong>Input images</strong></div>
-        <div id="dropContainer" class="row"></div>
+        <div id="dropContainer"></div>
       </div>
 
-      <!-- Keep Align button -->
-      <div>
-        <button id="alignBtn">Align</button>
-      </div>
+      <div class="right-panel">
+        <div class="controls">
+          <!-- Keep Align button -->
+          <div>
+            <button id="alignBtn">Align</button>
+          </div>
 
-      <!-- FPS slider + pause/resume button -->
-      <div class="fps-control">
-        <label for="fpsSlider">FPS:</label>
-        <input id="fpsSlider" type="range" min="1" max="30" value="2" step="1" />
-        <span id="fpsValue">2 fps</span>
-        <button id="pauseBtn">Play</button>
-      </div>
+          <!-- FPS slider + pause/resume button -->
+          <div class="fps-control">
+            <label for="fpsSlider">FPS:</label>
+            <input id="fpsSlider" type="range" min="1" max="30" value="2" step="1" />
+            <span id="fpsValue">2 fps</span>
+            <button id="pauseBtn">Play</button>
+          </div>
 
-      <div class="fps-control">
-        <label for="gifName">GIF filename:</label>
-        <input id="gifName" type="text" placeholder="animation.gif" />
-        <button id="exportGifBtn">Export GIF</button>
-      </div>
+          <div class="fps-control">
+            <label for="gifName">GIF filename:</label>
+            <input id="gifName" type="text" placeholder="animation.gif" />
+            <button id="exportGifBtn">Export GIF</button>
+          </div>
 
-      <!-- Per-dropzone hidden inputs are created dynamically -->
-    </div>
+          <!-- Per-dropzone hidden inputs are created dynamically -->
+        </div>
 
-    <!-- Removed visible source/target canvases per request.
-         Only the Matches/Overlay canvas remains. -->
-      <div><strong>Composite</strong></div>
-    <div class="row">
-      <div class="canvas-container" id="animationContainer">
-        <canvas id="animation" width="800" height="300"></canvas>
-        <div class="resize-handle" id="resizeHandle" title="Resize"></div>
+        <!-- Removed visible source/target canvases per request.
+             Only the Matches/Overlay canvas remains. -->
+        <div><strong>Composite</strong></div>
+        <div class="row">
+          <div class="canvas-container" id="animationContainer">
+            <canvas id="animation" width="800" height="300"></canvas>
+            <div class="resize-handle" id="resizeHandle" title="Resize"></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -237,13 +267,15 @@
 
       // Set animation canvas size to fit viewport width while preserving aspect ratio
       function setCanvasViewportForSize(imgW, imgH) {
-        const bodyMarginX = 36; // approx left+right margin from body styles
-        const availW = Math.max(300, Math.floor(document.documentElement.clientWidth - bodyMarginX));
-        const scale = Math.min(1, availW / imgW);
+        // Fit based on available viewport height, not width
+        const containerRect = animationContainer.getBoundingClientRect();
+        const marginBelow = 20; // breathing room at bottom
+        const availH = Math.max(200, Math.floor(window.innerHeight - containerRect.top - marginBelow));
+        const scale = Math.min(1, availH / imgH);
         // Only auto-size if user has not resized manually
         if (!_toggleState || !_toggleState.userSized) {
-          animationCanvas.width = Math.round(imgW * scale);
           animationCanvas.height = Math.round(imgH * scale);
+          animationCanvas.width = Math.round(imgW * scale);
         }
       }
 
