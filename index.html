@@ -59,6 +59,9 @@
         padding: 6px 8px;
         min-width: 180px;
       }
+      select, input[type="number"], input[type="color"] {
+        padding: 4px 6px;
+      }
 
       /* Drag & drop styles */
       .dropzone {
@@ -107,6 +110,15 @@
         flex-direction: column;
         gap: 10px;
       }
+      .dropzone-item {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .overlay-text-input {
+        width: 150px;
+        box-sizing: border-box;
+      }
 
       /* slider styling */
       .fps-control {
@@ -151,12 +163,10 @@
 
       <div class="right-panel">
         <div class="controls">
-          <!-- Keep Align button -->
           <div>
             <button id="alignBtn">Align</button>
           </div>
 
-          <!-- FPS slider + pause/resume button -->
           <div class="fps-control">
             <label for="fpsSlider">FPS:</label>
             <input id="fpsSlider" type="range" min="1" max="30" value="2" step="1" />
@@ -167,14 +177,36 @@
           <div class="fps-control">
             <label for="gifName">GIF filename:</label>
             <input id="gifName" type="text" placeholder="animation.gif" />
+            <label for="gifScale">Resolution:</label>
+            <input id="gifScale" type="range" min="1" max="4" value="2" step="1" />
+            <span id="gifScaleValue">2x</span>
             <button id="exportGifBtn">Export GIF</button>
           </div>
 
-          <!-- Per-dropzone hidden inputs are created dynamically -->
+          <div class="fps-control">
+            <label><input id="overlayEnabled" type="checkbox" checked /> Text overlay</label>
+          </div>
+          <div class="fps-control" id="overlayStyleControls" style="display:none;">
+            <label for="overlaySize">Size:</label>
+            <input id="overlaySize" type="number" min="8" max="200" value="24" style="width:72px;" />
+            <label for="overlayColor">Colour:</label>
+            <input id="overlayColor" type="color" value="#ffffff" />
+            <label><input id="overlayOutlineEnabled" type="checkbox" checked /> Outline</label>
+            <label for="overlayOutlineColor">Outline colour:</label>
+            <input id="overlayOutlineColor" type="color" value="#000000" />
+            <label for="overlayPosition">Position:</label>
+            <select id="overlayPosition">
+              <option value="top-left">Top left</option>
+              <option value="top-center">Top center</option>
+              <option value="top-right">Top right</option>
+              <option value="bottom-left">Bottom left</option>
+              <option value="bottom-center">Bottom center</option>
+              <option value="bottom-right" selected>Bottom right</option>
+              <option value="center">Center</option>
+            </select>
+          </div>
         </div>
 
-        <!-- Removed visible source/target canvases per request.
-             Only the Matches/Overlay canvas remains. -->
         <div><strong>Composite</strong></div>
         <div class="row">
           <div class="canvas-container" id="animationContainer">
@@ -202,6 +234,15 @@
 
       const gifNameInput = document.getElementById("gifName");
       const exportGifBtn = document.getElementById("exportGifBtn");
+      const gifScaleSlider = document.getElementById("gifScale");
+      const gifScaleValue = document.getElementById("gifScaleValue");
+      const overlayEnabledInput = document.getElementById("overlayEnabled");
+      const overlayStyleControls = document.getElementById("overlayStyleControls");
+      const overlaySizeInput = document.getElementById("overlaySize");
+      const overlayColorInput = document.getElementById("overlayColor");
+      const overlayOutlineEnabledInput = document.getElementById("overlayOutlineEnabled");
+      const overlayOutlineColorInput = document.getElementById("overlayOutlineColor");
+      const overlayPositionInput = document.getElementById("overlayPosition");
       let gifNameAutofill = true;
       let firstImageStem = null;
 
@@ -212,6 +253,9 @@
 
       // Dynamic dropzones: create as needed and append to container
       function createDropzone() {
+        const item = document.createElement("div");
+        item.className = "dropzone-item";
+
         const dropElem = document.createElement("div");
         dropElem.className = "dropzone";
 
@@ -230,10 +274,18 @@
         inputElem.className = "hidden-input";
         dropElem.appendChild(inputElem);
 
-        dropContainer.appendChild(dropElem);
+        const overlayInput = document.createElement("input");
+        overlayInput.type = "text";
+        overlayInput.className = "overlay-text-input";
+        overlayInput.placeholder = "Text for this image";
+        overlayInput.style.display = overlayEnabledInput && overlayEnabledInput.checked ? "block" : "none";
+
+        item.appendChild(dropElem);
+        item.appendChild(overlayInput);
+        dropContainer.appendChild(item);
         addDnDHandlers(dropElem, inputElem, canvas);
-        dropZones.push({ dropElem, inputElem, canvas });
-        return { dropElem, inputElem, canvas };
+        dropZones.push({ item, dropElem, inputElem, canvas, overlayInput });
+        return { item, dropElem, inputElem, canvas, overlayInput };
       }
 
       function allDropzonesFilled() {
@@ -259,6 +311,76 @@
           gifNameInput.value = `${stem || "animation"}.gif`;
           gifNameAutofill = true;
         }
+      }
+
+      function getOverlayStyle() {
+        const size = Math.max(8, Number(overlaySizeInput && overlaySizeInput.value) || 24);
+        const color = (overlayColorInput && overlayColorInput.value) || "#ffffff";
+        const outlineEnabled = !overlayOutlineEnabledInput || overlayOutlineEnabledInput.checked;
+        const outlineColor = (overlayOutlineColorInput && overlayOutlineColorInput.value) || "#000000";
+        const position = (overlayPositionInput && overlayPositionInput.value) || "bottom-right";
+        const enabled = !overlayEnabledInput || overlayEnabledInput.checked;
+        return { enabled, size, color, outlineEnabled, outlineColor, position };
+      }
+
+      function updateOverlayUiVisibility() {
+        const visible = !!(overlayEnabledInput && overlayEnabledInput.checked);
+        if (overlayStyleControls) {
+          overlayStyleControls.style.display = visible ? "flex" : "none";
+        }
+        dropZones.forEach((z) => {
+          if (z && z.overlayInput) {
+            z.overlayInput.style.display = visible ? "block" : "none";
+          }
+        });
+      }
+
+      function drawOverlayText(ctx, canvasW, canvasH, text, style) {
+        if (!style || !style.enabled) return;
+        if (!text || !String(text).trim()) return;
+        const cleanText = String(text).trim();
+        const margin = Math.max(8, Math.round(style.size * 0.35));
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.font = `700 ${style.size}px Arial, sans-serif`;
+        ctx.fillStyle = style.color;
+        ctx.textBaseline = "alphabetic";
+        ctx.textAlign = "left";
+        const metrics = ctx.measureText(cleanText);
+        const textW = metrics.width;
+        const ascent = metrics.actualBoundingBoxAscent || style.size * 0.8;
+        const descent = metrics.actualBoundingBoxDescent || style.size * 0.2;
+        let x = margin;
+        let y = margin + ascent;
+        if (style.position === "top-right") {
+          x = canvasW - margin - textW;
+          y = margin + ascent;
+        } else if (style.position === "top-center") {
+          x = (canvasW - textW) / 2;
+          y = margin + ascent;
+        } else if (style.position === "bottom-left") {
+          x = margin;
+          y = canvasH - margin - descent;
+        } else if (style.position === "bottom-center") {
+          x = (canvasW - textW) / 2;
+          y = canvasH - margin - descent;
+        } else if (style.position === "bottom-right") {
+          x = canvasW - margin - textW;
+          y = canvasH - margin - descent;
+        } else if (style.position === "center") {
+          x = (canvasW - textW) / 2;
+          y = (canvasH + ascent - descent) / 2;
+        }
+        x = Math.max(0, Math.min(canvasW - textW, x));
+        y = Math.max(ascent, Math.min(canvasH - descent, y));
+        if (style.outlineEnabled) {
+          ctx.strokeStyle = style.outlineColor || "#000000";
+          ctx.lineWidth = Math.max(2, Math.round(style.size * 0.12));
+          ctx.lineJoin = "round";
+          ctx.strokeText(cleanText, x, y);
+        }
+        ctx.fillText(cleanText, x, y);
+        ctx.restore();
       }
 
       const animationCanvas = document.getElementById("animation");
@@ -537,9 +659,22 @@
 
         // Build frames: first the reference, then each warped to reference (skip nulls)
         const frames = [refCanvas];
-        for (const c of others) {
-          const warpedCanvas = warpToReference(c, refCanvas);
-          if (warpedCanvas) frames.push(warpedCanvas);
+        const frameSourceIndices = [0];
+        const frameTexts = [
+          filled[0].overlayInput && filled[0].overlayInput.value
+            ? filled[0].overlayInput.value.trim()
+            : ""
+        ];
+        for (let i = 0; i < others.length; i++) {
+          const warpedCanvas = warpToReference(others[i], refCanvas);
+          if (warpedCanvas) {
+            frames.push(warpedCanvas);
+            const txt = filled[i + 1].overlayInput && filled[i + 1].overlayInput.value
+              ? filled[i + 1].overlayInput.value.trim()
+              : "";
+            frameTexts.push(txt);
+            frameSourceIndices.push(i + 1);
+          }
         }
 
         // If only reference, nothing to animate
@@ -552,7 +687,7 @@
         }
 
         // Start slideshow across all frames
-        startSlideshowFromCanvases(frames, Number(fpsSlider.value)).catch(e => console.error(e));
+        startSlideshowFromCanvases(frames, Number(fpsSlider.value), frameTexts, frameSourceIndices).catch(e => console.error(e));
       }
 
       alignBtn.addEventListener("click", alignImages);
@@ -572,7 +707,7 @@
         pauseBtn.textContent = "Pause";
       }
 
-      async function startSlideshowFromCanvases(canvases, fps = 2) {
+      async function startSlideshowFromCanvases(canvases, fps = 2, frameTexts = [], frameSourceIndices = []) {
         stopToggle();
         try {
           const bitmaps = await Promise.all(canvases.map(c => createImageBitmap(c)));
@@ -588,10 +723,13 @@
             fps: Math.max(1, Math.floor(fps)),
             paused: false,
             frameIndex: 0,
+            frameTexts,
+            frameSourceIndices,
             timer: null,
             // autoFit keeps the image fully in view unless the user pans/zooms
             view: { scale: 1, tx: 0, ty: 0, autoFit: true },
-            frameDelay: Math.max(20, Math.round(1000 / Math.max(1, Math.floor(fps))))
+            frameDelay: Math.max(20, Math.round(1000 / Math.max(1, Math.floor(fps)))),
+            overlayStyle: getOverlayStyle()
           };
 
           function fitViewToBitmap(bmp, returnOnly = false) {
@@ -628,6 +766,16 @@
             ctxLocal.imageSmoothingEnabled = false;
             ctxLocal.drawImage(bmp, 0, 0);
             ctxLocal.restore();
+            const text = _toggleState.frameTexts && _toggleState.frameTexts.length
+              ? (_toggleState.frameTexts[_toggleState.frameIndex % _toggleState.frameTexts.length] || "")
+              : "";
+            drawOverlayText(
+              ctxLocal,
+              animationCanvas.width,
+              animationCanvas.height,
+              text,
+              _toggleState.overlayStyle || getOverlayStyle()
+            );
             if (advance) {
               _toggleState.frameIndex = (_toggleState.frameIndex + 1) % bitmaps.length;
             }
@@ -711,18 +859,34 @@
         const delay = _toggleState.frameDelay || Math.max(20, Math.round(1000 / Math.max(1, Number(fpsSlider.value) || 2)));
         console.log("Export filename:", filename, "delay:", delay, "num frames:", _toggleState.bitmaps.length);
 
+        const exportScale = Math.max(1, Number(gifScaleSlider && gifScaleSlider.value) || 2);
         const offscreen = document.createElement('canvas');
-        offscreen.width = animationCanvas.width;
-        offscreen.height = animationCanvas.height;
+        offscreen.width = Math.round(animationCanvas.width * exportScale);
+        offscreen.height = Math.round(animationCanvas.height * exportScale);
         const offctx = offscreen.getContext('2d');
-        const gif = new GIF({
+        const isFileProtocol = window.location.protocol === 'file:';
+        let blobWorkerUrl = null;
+        const gifOptions = {
           workers: 2,
           quality: 10,
           workerScript: 'gif.worker.js'
-        });
+        };
+        if (isFileProtocol) {
+          // file:// pages cannot spawn workers from local file paths.
+          // Use a same-origin blob: URL worker that imports gif.js worker from CDN.
+          const workerSource =
+            "importScripts('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js');";
+          blobWorkerUrl = URL.createObjectURL(
+            new Blob([workerSource], { type: 'application/javascript' })
+          );
+          gifOptions.workers = 1;
+          gifOptions.workerScript = blobWorkerUrl;
+        }
+        const gif = new GIF(gifOptions);
         console.log("GIF object created");
 
         const view = _toggleState.view || { scale: 1, tx: 0, ty: 0, autoFit: true };
+        const overlayStyle = _toggleState.overlayStyle || getOverlayStyle();
         const fitHelper = _toggleState.fitViewToBitmap;
 
         _toggleState.bitmaps.forEach((bmp, idx) => {
@@ -740,35 +904,105 @@
           }
           offctx.setTransform(1, 0, 0, 1, 0, 0);
           offctx.clearRect(0, 0, offscreen.width, offscreen.height);
-          offctx.setTransform(scale, 0, 0, scale, tx, ty);
+          offctx.setTransform(
+            scale * exportScale,
+            0,
+            0,
+            scale * exportScale,
+            tx * exportScale,
+            ty * exportScale
+          );
           offctx.imageSmoothingEnabled = false;
           offctx.drawImage(bmp, 0, 0);
+          const text = _toggleState.frameTexts && _toggleState.frameTexts.length
+            ? (_toggleState.frameTexts[idx % _toggleState.frameTexts.length] || "")
+            : "";
+          drawOverlayText(
+            offctx,
+            offscreen.width,
+            offscreen.height,
+            text,
+            {
+              enabled: overlayStyle.enabled,
+              size: Math.max(8, Math.round((overlayStyle.size || 24) * exportScale)),
+              color: overlayStyle.color,
+              outlineEnabled: overlayStyle.outlineEnabled,
+              outlineColor: overlayStyle.outlineColor,
+              position: overlayStyle.position
+            }
+          );
           gif.addFrame(offscreen, { copy: true, delay });
           console.log("Added frame", idx);
         });
         console.log("All frames added, starting render");
 
+        const originalExportLabel = exportGifBtn ? exportGifBtn.textContent : "";
+        let stalledTimer = null;
+        let sawProgress = false;
+        if (exportGifBtn) {
+          exportGifBtn.disabled = true;
+          exportGifBtn.textContent = "Rendering GIF...";
+        }
+        const clearRenderState = () => {
+          if (stalledTimer) {
+            clearTimeout(stalledTimer);
+            stalledTimer = null;
+          }
+          if (exportGifBtn) {
+            exportGifBtn.disabled = false;
+            exportGifBtn.textContent = originalExportLabel || "Export GIF";
+          }
+          if (blobWorkerUrl) {
+            URL.revokeObjectURL(blobWorkerUrl);
+            blobWorkerUrl = null;
+          }
+        };
+        stalledTimer = setTimeout(() => {
+          if (sawProgress) return;
+          clearRenderState();
+          alert("GIF export stalled. Open DevTools console for details. If possible, run this page from a local server instead of opening the .html directly.");
+        }, 15000);
+
         gif.on('finished', (blob) => {
+          clearRenderState();
           console.log("GIF finished, blob size:", blob.size);
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
           a.download = filename;
+          a.style.display = 'none';
+          document.body.appendChild(a);
           console.log("Triggering download for:", filename);
           a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+          }, 1000);
         });
 
         gif.on('error', (err) => {
+          clearRenderState();
           console.error('GIF export failed:', err);
           alert('Failed to export GIF: ' + err);
         });
 
         gif.on('progress', (progress) => {
+          sawProgress = true;
           console.log("GIF progress:", progress);
+          if (exportGifBtn) {
+            const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
+            exportGifBtn.textContent = `Rendering ${pct}%`;
+          }
         });
 
-        gif.render();
+        try {
+          gif.render();
+        } catch (err) {
+          clearRenderState();
+          console.error("gif.render() threw:", err);
+          alert("Failed to start GIF export: " + (err && err.message ? err.message : err));
+          return;
+        }
         console.log("gif.render() called");
       }
 
@@ -806,6 +1040,29 @@
 
       // initialize fps UI
       updateFpsDisplay(fpsSlider.value);
+      if (gifScaleSlider && gifScaleValue) {
+        const updateGifScaleDisplay = (v) => {
+          gifScaleValue.textContent = `${v}x`;
+        };
+        updateGifScaleDisplay(gifScaleSlider.value);
+        gifScaleSlider.addEventListener("input", (e) => {
+          updateGifScaleDisplay(e.target.value);
+        });
+      }
+
+      function refreshOverlayStyleAndRedraw() {
+        updateOverlayUiVisibility();
+        if (!_toggleState) return;
+        _toggleState.overlayStyle = getOverlayStyle();
+        if (_toggleState.drawCurrent) _toggleState.drawCurrent(false);
+      }
+      if (overlayEnabledInput) overlayEnabledInput.addEventListener("change", refreshOverlayStyleAndRedraw);
+      if (overlaySizeInput) overlaySizeInput.addEventListener("input", refreshOverlayStyleAndRedraw);
+      if (overlayColorInput) overlayColorInput.addEventListener("input", refreshOverlayStyleAndRedraw);
+      if (overlayOutlineEnabledInput) overlayOutlineEnabledInput.addEventListener("change", refreshOverlayStyleAndRedraw);
+      if (overlayOutlineColorInput) overlayOutlineColorInput.addEventListener("input", refreshOverlayStyleAndRedraw);
+      if (overlayPositionInput) overlayPositionInput.addEventListener("change", refreshOverlayStyleAndRedraw);
+      updateOverlayUiVisibility();
 
       // Export GIF button listener
       exportGifBtn.addEventListener("click", exportGifFromComposite);
@@ -831,6 +1088,25 @@
         const t = e.target;
         if (t && t.matches && t.matches('input[type="file"]')) stopToggle();
       }, true);
+      dropContainer.addEventListener("input", (e) => {
+        const t = e.target;
+        if (!(t && t.classList && t.classList.contains("overlay-text-input"))) return;
+        if (!_toggleState) return;
+        const filled = dropZones.filter(z => z.fullCanvas && z.fullCanvas.width > 0 && z.fullCanvas.height > 0);
+        const srcIdx = _toggleState.frameSourceIndices || [];
+        if (srcIdx.length > 0) {
+          _toggleState.frameTexts = srcIdx.map((i) =>
+            filled[i] && filled[i].overlayInput && filled[i].overlayInput.value
+              ? filled[i].overlayInput.value.trim()
+              : ""
+          );
+        } else {
+          _toggleState.frameTexts = filled.map(z =>
+            z.overlayInput && z.overlayInput.value ? z.overlayInput.value.trim() : ""
+          );
+        }
+        if (_toggleState.drawCurrent) _toggleState.drawCurrent(false);
+      });
 
       // Zoom & Pan interactions for Composite canvas
       (function enableZoomPan() {
