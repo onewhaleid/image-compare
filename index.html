@@ -181,6 +181,7 @@
             <input id="gifScale" type="range" min="1" max="4" value="2" step="1" />
             <span id="gifScaleValue">2x</span>
             <button id="exportGifBtn">Export GIF</button>
+            <button id="downloadFramesBtn">Export frames</button>
           </div>
 
           <div class="fps-control">
@@ -1063,6 +1064,76 @@
       if (overlayOutlineColorInput) overlayOutlineColorInput.addEventListener("input", refreshOverlayStyleAndRedraw);
       if (overlayPositionInput) overlayPositionInput.addEventListener("change", refreshOverlayStyleAndRedraw);
       updateOverlayUiVisibility();
+
+      async function downloadFramesAsJpeg() {
+        if (!_toggleState || !_toggleState.bitmaps || _toggleState.bitmaps.length === 0) {
+          alert("Run Align first so the composite has frames to export.");
+          return;
+        }
+        const bitmaps = _toggleState.bitmaps;
+        const stem = (gifNameInput && gifNameInput.value.trim().replace(/\.gif$/i, '')) || firstImageStem || "frame";
+        const exportScale = Math.max(1, Number(gifScaleSlider && gifScaleSlider.value) || 2);
+        const overlayStyle = _toggleState.overlayStyle || getOverlayStyle();
+        const view = _toggleState.view || { scale: 1, tx: 0, ty: 0, autoFit: true };
+        const fitHelper = _toggleState.fitViewToBitmap;
+        const downloadFramesBtn = document.getElementById('downloadFramesBtn');
+        const originalLabel = downloadFramesBtn ? downloadFramesBtn.textContent : '';
+        if (downloadFramesBtn) { downloadFramesBtn.disabled = true; downloadFramesBtn.textContent = 'Downloading...'; }
+
+        const offscreen = document.createElement('canvas');
+        offscreen.width = Math.round(animationCanvas.width * exportScale);
+        offscreen.height = Math.round(animationCanvas.height * exportScale);
+        const offctx = offscreen.getContext('2d');
+        const digits = String(bitmaps.length).length;
+
+        try {
+          for (let idx = 0; idx < bitmaps.length; idx++) {
+            const bmp = bitmaps[idx];
+            if (!bmp) continue;
+            let scale = view.scale, tx = view.tx, ty = view.ty;
+            if (view.autoFit && typeof fitHelper === 'function') {
+              const res = fitHelper(bmp, true);
+              if (res) { scale = res.scale; tx = res.tx; ty = res.ty; }
+            }
+            offctx.setTransform(1, 0, 0, 1, 0, 0);
+            offctx.clearRect(0, 0, offscreen.width, offscreen.height);
+            offctx.setTransform(scale * exportScale, 0, 0, scale * exportScale, tx * exportScale, ty * exportScale);
+            offctx.imageSmoothingEnabled = false;
+            offctx.drawImage(bmp, 0, 0);
+            const text = _toggleState.frameTexts && _toggleState.frameTexts.length
+              ? (_toggleState.frameTexts[idx % _toggleState.frameTexts.length] || '')
+              : '';
+            drawOverlayText(offctx, offscreen.width, offscreen.height, text, {
+              enabled: overlayStyle.enabled,
+              size: Math.max(8, Math.round((overlayStyle.size || 24) * exportScale)),
+              color: overlayStyle.color,
+              outlineEnabled: overlayStyle.outlineEnabled,
+              outlineColor: overlayStyle.outlineColor,
+              position: overlayStyle.position
+            });
+            const padded = String(idx + 1).padStart(digits, '0');
+            const filename = `${stem}_frame${padded}.jpg`;
+            if (downloadFramesBtn) downloadFramesBtn.textContent = `Downloading ${idx + 1}/${bitmaps.length}...`;
+            await new Promise(resolve => {
+              offscreen.toBlob(blob => {
+                if (!blob) { resolve(); return; }
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => { URL.revokeObjectURL(url); a.remove(); resolve(); }, 200);
+              }, 'image/jpeg', 0.95);
+            });
+          }
+        } finally {
+          if (downloadFramesBtn) { downloadFramesBtn.disabled = false; downloadFramesBtn.textContent = originalLabel; }
+        }
+      }
+
+      document.getElementById('downloadFramesBtn').addEventListener('click', downloadFramesAsJpeg);
 
       // Export GIF button listener
       exportGifBtn.addEventListener("click", exportGifFromComposite);
