@@ -619,7 +619,7 @@
             dstPts.floatPtr(i, 0)[1] = pR.y;
           }
           const mask = new cv.Mat();
-          const H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
+          const H = cv.findHomography(srcPts, dstPts, cv.USAC_MAGSAC, 5, mask);
           if (H.empty()) {
             [graySrc, grayRef, orb, kpSrc, kpRef, desSrc, desRef, bf, matches, goodMatches, srcPts, dstPts, mask, srcSmall, refSmall, src, ref].forEach(x => x.delete && x.delete());
             return null;
